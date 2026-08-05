@@ -36,6 +36,7 @@ createServer(async (req, res) => {
     const data = await readFile(file);
     res.writeHead(200, {
       'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
+      'Content-Length': data.length,
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'require-corp',
       'Cache-Control': 'no-cache',

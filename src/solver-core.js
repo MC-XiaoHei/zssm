@@ -19,31 +19,64 @@ const DEFAULT_SAMPLE_SEEDS = [0, 42, 12345];
 
 let _initPromise = null;
 let _ctx = null;
+let _wasmBlobUrl = null;
 
-export function initSolver(moduleOverrides = {}) {
+// 从 z3-built.js 的 <script src> 推导 wasm 目录（页面深度无关，支持 /zssm/ 子路径）
+function wasmDir() {
+  for (const s of document.querySelectorAll('script[src]')) {
+    if (/z3-built\.js$/.test(s.src)) {
+      const u = new URL(s.src);
+      return u.origin + u.pathname.slice(0, u.pathname.lastIndexOf('/') + 1);
+    }
+  }
+  const u = new URL(location.href);
+  return u.origin + u.pathname.slice(0, u.pathname.lastIndexOf('/') + 1) + 'z3/';
+}
+
+// 带进度下载 wasm（ReadableStream + content-length），返回 blob URL 供 init 与
+// pthread worker 使用（worker 继承 locateFile，同源 blob URL 全局可用）。
+async function fetchWasmWithProgress(url, onProgress) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('wasm fetch ' + res.status);
+  const total = Number(res.headers.get('content-length')) || 0;
+  const reader = res.body.getReader();
+  const chunks = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    got += value.length;
+    // content-length 缺失（chunked 响应）时传 -1，由 UI 显示不确定进度
+    if (onProgress) onProgress(total > 0 ? got / total : -1);
+  }
+  return URL.createObjectURL(new Blob(chunks, { type: 'application/wasm' }));
+}
+
+export function initSolver(moduleOverrides = {}, onProgress) {
   if (!_initPromise) {
     const isBrowser = typeof window !== 'undefined' && typeof location !== 'undefined';
     // 浏览器：外置 wasm（部署根 z3/），locateFile 需被 pthread worker 继承。
-    // 用页面相对路径 base（支持 gh-pages 子路径部署，如 /zssm/）。
+    // 传 onProgress 时先行预下载 wasm（显示进度），成功后用 blob URL 替代网络加载。
     const overrides = isBrowser
       ? {
           locateFile: p => {
-            // 从 z3-built.js 的 <script src> 推导 wasm 目录（页面深度无关，
-            // 支持 /zssm/ 子路径与 test/ 等嵌套页面）。
-            for (const s of document.querySelectorAll('script[src]')) {
-              if (/z3-built\.js$/.test(s.src)) {
-                const u = new URL(s.src);
-                return u.origin + u.pathname.slice(0, u.pathname.lastIndexOf('/') + 1) + p;
-              }
-            }
-            const u = new URL(location.href);
-            const base = u.origin + u.pathname.slice(0, u.pathname.lastIndexOf('/') + 1);
-            return base + 'z3/' + p;
+            if (_wasmBlobUrl && /\.wasm$/.test(p)) return _wasmBlobUrl;
+            return wasmDir() + p;
           },
           ...moduleOverrides,
         }
       : moduleOverrides;
-    _initPromise = init(overrides);
+    _initPromise = (async () => {
+      if (isBrowser && typeof onProgress === 'function') {
+        try {
+          _wasmBlobUrl = await fetchWasmWithProgress(wasmDir() + 'z3-built.wasm', onProgress);
+        } catch {
+          // 预加载失败（离线/被拦截）：降级为 emscripten 自行加载，不阻塞初始化
+        }
+      }
+      return init(overrides);
+    })();
   }
   return _initPromise;
 }

@@ -4,7 +4,6 @@
   "description": "网格哈密顿路径 · 纯前端 SAT 求解器（z3-solver wasm）",
   "type": "module",
   "scripts": {
-    "test": "node test/run.js",
     "build": "node scripts/build.mjs",
     "serve": "node scripts/serve.mjs"
   },

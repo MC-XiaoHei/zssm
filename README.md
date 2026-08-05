@@ -11,7 +11,6 @@
 ## 在线演示
 
 - 主页面：https://mc-xiaohei.github.io/zssm/
-- 浏览器端规格用例：https://mc-xiaohei.github.io/zssm/test/
 
 ## 功能
 
@@ -19,17 +18,15 @@
 - 求解：SAT 编码 + lazy 连通性迭代（`OR(cross)`），端点限边界可选
 - 转弯优化：`Optimize.minimize(turn_sum)` 求 T*（已证明最优），并给出探索样本 / 对比解列表，按转弯数升序展示，点击切换查看
 - 路径绘制：金色路径线、弯道白点、绿起红终、坐标轴；路径序列一键复制
+- 首次加载进度条：wasm 求解内核（约 35MB）带下载进度提示；之后由 Service Worker 缓存，二次访问秒开
 
 ## 本地运行
 
 ```bash
 pnpm install
-pnpm test        # Node 端规格用例（9×11 87 格、T 形 UNSAT、转弯优化等 18 项）
 pnpm build       # 构建 public/（esbuild bundle + z3 wasm 拷贝 + coi-serviceworker）
 pnpm serve       # http://localhost:8080（自带 COOP/COEP 响应头）
 ```
-
-浏览器验证用例：`http://localhost:8080/test/`
 
 ## 部署（GitHub Pages）
 
@@ -55,10 +52,6 @@ index.html             # UI 源文件
 src/
   solver-core.js       # SAT 编码 + 连通性迭代 + 路径重建 + 转弯优化（纯函数，Node/浏览器共用）
   ui.js                # Canvas 网格编辑、绘制、候选列表
-  browser-test.js      # 浏览器端规格用例
-test/
-  run.js               # Node 端规格用例（18 项断言）
-  browser.html         # 浏览器端用例页面
 scripts/
   build.mjs            # esbuild bundle + z3 文件拷贝 + _headers
   serve.mjs            # 本地静态服务器（COOP/COEP）

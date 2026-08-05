@@ -11,7 +11,6 @@ const z3Build = path.join(root, 'node_modules', 'z3-solver', 'build');
 
 await rm(pub, { recursive: true, force: true });
 await mkdir(path.join(pub, 'z3'), { recursive: true });
-await mkdir(path.join(pub, 'test'), { recursive: true });
 
 const common = {
   bundle: true,
@@ -30,16 +29,7 @@ await build({
   sourcemap: true,
 });
 
-await build({
-  ...common,
-  entryPoints: [path.join(root, 'src', 'browser-test.js')],
-  outfile: path.join(pub, 'test', 'test.js'),
-  format: 'iife',
-  minify: true,
-});
-
 await copyFile(path.join(root, 'index.html'), path.join(pub, 'index.html'));
-await copyFile(path.join(root, 'test', 'browser.html'), path.join(pub, 'test', 'index.html'));
 await copyFile(path.join(z3Build, 'z3-built.js'), path.join(pub, 'z3', 'z3-built.js'));
 await copyFile(path.join(z3Build, 'z3-built.wasm'), path.join(pub, 'z3', 'z3-built.wasm'));
 

@@ -73,6 +73,20 @@
     margin-top: 10px; max-height: 120px; overflow: auto; font-size: 12px;
     font-family: Consolas, monospace; color: var(--muted); word-break: break-all;
   }
+  #wasmbar {
+    position: fixed; left: 0; right: 0; bottom: 0; height: 26px; z-index: 20;
+    background: var(--panel); border-top: 1px solid var(--border);
+    display: flex; align-items: center;
+  }
+  #wasmbar[hidden] { display: none; }
+  #wasmbar-fill {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 0%;
+    background: rgba(240, 180, 41, 0.3); transition: width 0.12s linear;
+  }
+  #wasmbar-label {
+    position: relative; margin-left: 12px; font-size: 12px;
+    font-family: Consolas, "Courier New", monospace; color: var(--gold);
+  }
 </style>
 </head>
 <body>
@@ -98,6 +112,10 @@
   <div id="clist" class="clist"></div>
   <div id="pathout" class="pathout"></div>
 </main>
+<div id="wasmbar" hidden>
+  <div id="wasmbar-fill"></div>
+  <span id="wasmbar-label"></span>
+</div>
 <script src="z3/z3-built.js"></script>
 <script src="app.js" defer></script>
 </body>

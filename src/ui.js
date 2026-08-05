@@ -1,5 +1,5 @@
 // ui.js — 网格编辑 + 求解 + Canvas 绘制（DOM 层，依赖 solver-core）
-import { solveOptimize } from './solver-core.js';
+import { solveOptimize, initSolver } from './solver-core.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -413,5 +413,27 @@ $('copy').addEventListener('click', async () => {
 });
 
 // ---------- 启动 ----------
+// 预加载 wasm（带进度条）：首次访问需下载 ~35MB；之后由 coi-serviceworker 缓存，秒开。
+initSolver({}, frac => {
+  const bar = $('wasmbar');
+  if (!bar) return;
+  bar.hidden = false;
+  const fill = $('wasmbar-fill');
+  const label = $('wasmbar-label');
+  if (frac < 0) {
+    // chunked 响应（无 content-length）：显示不确定进度
+    fill.style.width = '35%';
+    label.textContent = '加载 WASM 求解内核…';
+  } else {
+    fill.style.width = (frac * 100).toFixed(1) + '%';
+    label.textContent = '加载 WASM 求解内核 ' + (frac * 100).toFixed(0) + '%';
+  }
+})
+  .then(() => {
+    $('wasmbar').hidden = true;
+  })
+  .catch(() => {
+    $('wasmbar').hidden = true;
+  });
 loadSample();
 render();
