@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>zssm 浏览器端规格书用例</title>
+<script src="../coi-serviceworker.js"></script>
+<style>
+  body { background: #0d1117; color: #d5dde5; font: 14px/1.6 sans-serif; padding: 24px; }
+  h1 { font-size: 18px; }
+  table { border-collapse: collapse; margin-top: 12px; }
+  td, th { border: 1px solid #2c3540; padding: 6px 12px; font-size: 13px; }
+  th { background: #161b22; }
+  .ok { color: #2fb344; }
+  .fail { color: #e5484d; font-weight: 700; }
+  #note { color: #8b98a5; margin-top: 12px; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>zssm · 规格书 6 用例（浏览器内直跑 solver-core）</h1>
+<p>此页验证：z3-wasm 加载、pthread worker 的 wasm 继承、编码正确性（与 Node 侧 test/run.js 同源同用例）。</p>
+<table id="tbl">
+  <tr><th>用例</th><th>结果</th><th>迭代</th><th>耗时</th><th>校验</th><th>判定</th></tr>
+</table>
+<div id="note">运行中…（首次加载 z3-wasm 需数秒；worker 初始化失败会在此页显示）</div>
+<script src="../z3/z3-built.js"></script>
+<script src="test.js"></script>
+</body>
+</html>

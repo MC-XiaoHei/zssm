@@ -1,0 +1,18 @@
+{
+  "name": "zssm",
+  "version": "1.0.0",
+  "description": "网格哈密顿路径 · 纯前端 SAT 求解器（z3-solver wasm）",
+  "type": "module",
+  "scripts": {
+    "test": "node test/run.js",
+    "build": "node scripts/build.mjs",
+    "serve": "node scripts/serve.mjs"
+  },
+  "dependencies": {
+    "z3-solver": "^5.0.0"
+  },
+  "devDependencies": {
+    "coi-serviceworker": "^0.1.7",
+    "esbuild": "^0.28.1"
+  }
+}
