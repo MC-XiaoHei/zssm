@@ -10,8 +10,8 @@
 
 ## 在线演示
 
-- 主页面：`https://<your-github-org>.github.io/zssm/`
-- 浏览器端规格用例：`https://<your-github-org>.github.io/zssm/test/`
+- 主页面：https://mc-xiaohei.github.io/zssm/
+- 浏览器端规格用例：https://mc-xiaohei.github.io/zssm/test/
 
 ## 功能
 
