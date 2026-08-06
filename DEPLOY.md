@@ -15,10 +15,11 @@ pnpm serve          # 本地预览 http://localhost:8080（已带 COOP/COEP 头�
 ```
 public/
 ├── index.html          # 主页面（网格编辑 + 求解 + 绘制）
-├── app.js              # UI + 编码器 + z3 API 层（esbuild 打包）
+├── app.js              # UI 层（esbuild 打包，不含 z3）
+├── worker.js           # 求解 Worker（含 z3 API 层，esbuild 打包）
 ├── coi-serviceworker.js # 兜底补 COOP/COEP 头（无隔离时自动注册）
 └── z3/
-    ├── z3-built.js     # emscripten 运行时（独立 <script>，勿打包）
+    ├── z3-built.js     # emscripten 运行时（独立 <script> 由 worker importScripts）
     └── z3-built.wasm   # z3 内核（34.6MB，外置，首次加载有进度条）
 ```
 
@@ -63,4 +64,4 @@ SW 会自动代理加头，无需平台配置。
 
 ## 验证
 
-- 求解自检：`pnpm serve` 后打开 `http://localhost:8080/`，载入「示例布局」点「求解」，应显示 `SAT 有解 · 最优 33 转（已证明）· 87格`。
+- 求解自检：`pnpm serve` 后打开 `http://localhost:8080/`，载入「示例布局」点「求解」，应显示 `SAT 有解 · N路径/M弯` 的方案；点「优化路径数」收敛到 1 条（已证明最优），再点「优化转弯数」得到 33 弯（已证明最优）。

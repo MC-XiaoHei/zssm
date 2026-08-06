@@ -29,6 +29,16 @@ await build({
   sourcemap: true,
 });
 
+// 求解 worker（z3 wasm 在此运行；主线程不再加载 z3-built.js）
+await build({
+  ...common,
+  entryPoints: [path.join(root, 'src', 'worker.js')],
+  outfile: path.join(pub, 'worker.js'),
+  format: 'iife',
+  minify: true,
+  sourcemap: true,
+});
+
 await copyFile(path.join(root, 'index.html'), path.join(pub, 'index.html'));
 await copyFile(path.join(z3Build, 'z3-built.js'), path.join(pub, 'z3', 'z3-built.js'));
 await copyFile(path.join(z3Build, 'z3-built.wasm'), path.join(pub, 'z3', 'z3-built.wasm'));

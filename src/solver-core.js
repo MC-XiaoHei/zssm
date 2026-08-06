@@ -53,8 +53,18 @@ async function fetchWasmWithProgress(url, onProgress) {
   return URL.createObjectURL(new Blob(chunks, { type: 'application/wasm' }));
 }
 
-export function initSolver(moduleOverrides = {}, onProgress) {
-  if (!_initPromise) {
+// z3-built.js 的 URL（供求解 worker 内 importScripts 使用）
+export function z3ScriptUrl() {
+  return wasmDir() + 'z3-built.js';
+}
+
+// 主线程预载 wasm（带进度），返回 blob URL 供 worker 使用（避免 worker 内重复下载）
+export async function preloadWasm(onProgress) {
+  const blobUrl = await fetchWasmWithProgress(wasmDir() + 'z3-built.wasm', onProgress);
+  return { blobUrl, scriptUrl: z3ScriptUrl() };
+}
+
+export function initSolver(moduleOverrides = {}, onProgress) {  if (!_initPromise) {
     const isBrowser = typeof window !== 'undefined' && typeof location !== 'undefined';
     // 浏览器：外置 wasm（部署根 z3/），locateFile 需被 pthread worker 继承。
     // 传 onProgress 时先行预下载 wasm（显示进度），成功后用 blob URL 替代网络加载。
@@ -94,7 +104,9 @@ export function resetSolver() {
 
 // ---------- 共享构造：建图 + 约束 A/B/C + turn_sum ----------
 
-function buildInstance(api, grid, boundary) {
+// opts: { singlePath: bool（默认 true：单路径模式，含约束 B）}
+//       { boundary 由参数控制 }
+function buildInstance(api, grid, boundary, opts = {}) {
   const n = grid.length;
   const m = grid[0].length;
   for (const row of grid) {
@@ -150,17 +162,22 @@ function buildInstance(api, grid, boundary) {
   const d1 = deg.map(d => d.eq(ONE));
 
   // 约束 A/B/C（AST 数组，Solver 与 Optimize 共用）
+  inst.singlePath = opts.singlePath !== false;
   const base = [];
   for (let k = 0; k < V; k++) {
     base.push(Or(deg[k].eq(ONE), deg[k].eq(TWO))); // A
   }
-  base.push(Eq(Sum(...d1.map(d => If(d, ONE, ZERO))), TWO)); // B
+  if (inst.singlePath) {
+    base.push(Eq(Sum(...d1.map(d => If(d, ONE, ZERO))), TWO)); // B
+  }
   if (boundary) {
     for (let k = 0; k < V; k++) {
       if (!onB(empty[k])) base.push(Not(d1[k])); // C
     }
   }
   inst.base = base;
+  // 多路径模式：路径数 = Σ[endpoint] / 2（deg∈{1,2} 下恒为偶数）
+  inst.endpointSum = Sum(...d1.map(d => If(d, ONE, ZERO)));
 
   // turn_sum：turn(v) = (水平选中边数==1 ∧ 垂直选中边数==1)
   const horizontal = edges.map((e, k) => empty[e.u][0] === empty[e.v][0]);
@@ -501,4 +518,382 @@ export function verify(path, grid, boundary) {
     }
   }
   return 'OK';
+}
+
+// =====================================================================
+// 会话化多路径求解（交互式优化）
+// 流程：solveFirst（任意解）→ optimizePaths（最小路径数，证明最优）
+//       → optimizeTurns（锁定当前路径数，最小转弯，证明最优）
+// 每个方案（snapshot）携带完整约束日志 log，可 replay 重建求解状态；
+// 中间探索到的无环解也入历史（每个可用的方案都能 load/续算）。
+// log 条目：
+//   { type:'base' }              —— 基础约束（A + boundary 时的 C）
+//   { type:'cross', comp:[vIdx] }—— 拆环约束：分量至少一条跨边（OR(cross)）
+//   { type:'acyclic', comp:[vIdx] }—— 拆环 fallback：分量内边不全选（Or(Not(...))，用于全网格环）
+//   { type:'lockPaths', k }      —— 锁定路径数 == k（endpointSum == 2k）
+// =====================================================================
+
+export function newSession(grid, opts = {}) {
+  return {
+    grid,
+    boundary: opts.boundary !== false,
+    timeoutMs: opts.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
+    snapshots: [],
+    nextId: 1,
+    createdAt: Date.now(),
+  };
+}
+
+// 多路径解：全格被若干条路径覆盖（无环、无孤立格）。路径数 = 端点/2。
+function rebuildPaths(cells, inc, edges, used) {
+  const V = cells.length;
+  const deg = new Array(V).fill(0);
+  for (let k = 0; k < edges.length; k++) {
+    if (used.has(k)) {
+      deg[edges[k].u]++;
+      deg[edges[k].v]++;
+    }
+  }
+  const walked = new Set();
+  const paths = [];
+  for (let s = 0; s < V; s++) {
+    if (deg[s] !== 1) continue;
+    const starts = [];
+    for (const k of inc[s]) if (used.has(k)) starts.push(k);
+    if (starts.length === 0) continue;
+    let startEdge = starts[0];
+    // 优先未走过的边作为起点
+    for (const k of starts) {
+      if (!walked.has(k)) { startEdge = k; break; }
+    }
+    if (walked.has(startEdge)) continue;
+    const path = [cells[s]];
+    let cur = s;
+    let prevEdge = startEdge;
+    walked.add(startEdge);
+    const other = edges[startEdge].u === s ? edges[startEdge].v : edges[startEdge].u;
+    path.push(cells[other]);
+    cur = other;
+    // 沿链走到另一端点
+    for (;;) {
+      let next = -1;
+      let nextEdge = -1;
+      for (const k of inc[cur]) {
+        if (!used.has(k) || walked.has(k)) continue;
+        const o = edges[k].u === cur ? edges[k].v : edges[k].u;
+        if (o !== cur) { next = o; nextEdge = k; break; }
+      }
+      if (next < 0) break;
+      walked.add(nextEdge);
+      path.push(cells[next]);
+      cur = next;
+    }
+    paths.push(path);
+  }
+  return paths;
+}
+
+// 多路径校验：覆盖全部空格一次、逐路径相邻、boundary 时端点限边界
+export function verifyMulti(paths, grid, boundary) {
+  const n = grid.length;
+  const m = grid[0].length;
+  const V = grid.flat().filter(v => v === 0).length;
+  let total = 0;
+  const seen = new Set();
+  for (const path of paths) {
+    total += path.length;
+    if (path.length === 0) return '存在空路径';
+    for (const [i, j] of path) {
+      const k = i * m + j;
+      if (seen.has(k)) return '存在重复格子';
+      seen.add(k);
+    }
+    for (let k = 1; k < path.length; k++) {
+      const [a, b] = path[k - 1];
+      const [c, d] = path[k];
+      if (Math.abs(a - c) + Math.abs(b - d) !== 1) return `路径 ${k} 步不相邻`;
+    }
+    if (boundary) {
+      for (const [i, j] of [path[0], path[path.length - 1]]) {
+        if (i !== 0 && i !== n - 1 && j !== 0 && j !== m - 1) return '端点不在边界';
+      }
+    }
+  }
+  if (total !== V) return '长度错误';
+  return 'OK';
+}
+
+// 多路径解指纹：全部路径无向边集合的排序签名
+function multiSig(paths) {
+  const pairs = [];
+  for (const path of paths) {
+    for (let k = 0; k + 1 < path.length; k++) {
+      const a = path[k];
+      const b = path[k + 1];
+      pairs.push(JSON.stringify(a < b ? [a, b] : [b, a]));
+    }
+  }
+  pairs.sort();
+  return pairs.join('|');
+}
+
+function pathsStats(paths) {
+  let turnSum = 0;
+  for (const path of paths) turnSum += countTurns(path);
+  return { pathCount: paths.length, turnSum };
+}
+
+// 日志 → 约束 AST 数组（replay 用）
+function logToConstraints(inst, log) {
+  const { Or, Not } = inst.ctx;
+  const out = [...inst.base];
+  for (const e of log) {
+    if (e.type === 'cross' || e.type === 'acyclic') {
+      const comp = new Set(e.comp);
+      const cross = [];
+      const inner = [];
+      for (let k = 0; k < inst.edges.length; k++) {
+        const ed = inst.edges[k];
+        if (comp.has(ed.u) && comp.has(ed.v)) inner.push(inst.x[k]);
+        else if (comp.has(ed.u) !== comp.has(ed.v)) cross.push(inst.x[k]);
+      }
+      if (e.type === 'cross' && cross.length > 0) {
+        out.push(Or(...cross));
+      } else if (e.type === 'acyclic' && inner.length > 0) {
+        out.push(Or(...inner.map(xi => Not(xi))));
+      }
+    } else if (e.type === 'lockPaths') {
+      out.push(inst.endpointSum.eq(2 * e.k));
+    }
+  }
+  return out;
+}
+
+// 多路径 lazy 迭代：停止条件 = 无纯环分量（每分量至少一个端点）。
+// 对纯环分量加 OR(cross)（拆环）。返回本轮新增的 cross 日志。
+// collect(modelUsed, iters) 每轮调用（可收集中间无环解）。
+async function multiConnectedSolve(solver, inst, secs, collect, isCancelled) {
+  const { Or } = inst.ctx;
+  const log = [];
+  for (let iters = 1; iters <= MAX_ITERS; iters++) {
+    if (isCancelled && isCancelled()) return { status: 'cancelled', iters, seconds: secs(), log };
+    const res = await solver.check();
+    if (res === 'unsat') return { status: 'unsat', iters, seconds: secs(), log };
+    if (res === 'unknown') return { status: 'unknown', iters, seconds: secs(), log };
+
+    const model = solver.model();
+    const used = new Set();
+    for (let k = 0; k < inst.edges.length; k++) {
+      if (model.eval(inst.x[k]).toString() === 'true') used.add(k);
+    }
+    if (collect) await collect(used, iters);
+
+    const comps = components(inst.V, inst.inc, inst.edges, used);
+    const pureCycles = [];
+    for (const comp of comps) {
+      let hasEndpoint = false;
+      for (const v of comp) {
+        let d = 0;
+        for (const k of inst.inc[v]) if (used.has(k)) d++;
+        if (d === 1) { hasEndpoint = true; break; }
+      }
+      if (!hasEndpoint) pureCycles.push(comp);
+    }
+    if (pureCycles.length === 0) {
+      const paths = rebuildPaths(inst.empty, inst.inc, inst.edges, used);
+      return { status: 'sat', paths, iters, seconds: secs(), log };
+    }
+    for (const comp of pureCycles) {
+      const cross = [];
+      const inner = [];
+      for (let k = 0; k < inst.edges.length; k++) {
+        const ed = inst.edges[k];
+        if (comp.has(ed.u) && comp.has(ed.v)) inner.push(k);
+        else if (comp.has(ed.u) !== comp.has(ed.v)) cross.push(k);
+      }
+      if (cross.length > 0) {
+        solver.add(Or(...cross.map(k => inst.x[k])));
+        log.push({ type: 'cross', comp: [...comp] });
+      } else if (inner.length > 0) {
+        // 全网格环：无跨边，禁止分量内边全选（Or(Not(...))）
+        solver.add(Or(...inner.map(k => inst.ctx.Not(inst.x[k]))));
+        log.push({ type: 'acyclic', comp: [...comp] });
+      }
+    }
+  }
+  return { status: 'unknown', iters: MAX_ITERS, seconds: secs(), log };
+}
+
+function makeSnapshot(session, kind, fromId, res, extra = {}) {
+  const stats = res.paths ? pathsStats(res.paths) : {};
+  const snap = {
+    id: session.nextId++,
+    parentId: fromId ?? null,
+    kind,
+    createdAt: Date.now(),
+    elapsedMs: Math.round(res.seconds * 1000),
+    status: res.status,
+    iters: res.iters,
+    pathCount: stats.pathCount ?? null,
+    turnSum: stats.turnSum ?? null,
+    paths: res.paths ?? null,
+    check: res.paths ? verifyMulti(res.paths, session.grid, session.boundary) : null,
+    provenPaths: false,
+    provenTurns: false,
+    ...extra,
+  };
+  if (kind === 'first') snap.label = '任意解';
+  else if (kind === 'paths') snap.label = `优化路径数 → ${snap.pathCount} 条`;
+  else if (kind === 'turns') snap.label = `优化转弯数 → ${snap.turnSum} 弯`;
+  else if (kind === 'probe') snap.label = `中间解 · ${snap.pathCount}路径 / ${snap.turnSum}弯`;
+  return snap;
+}
+
+// 收集中间无环解入历史（去重），返回本次是否新增
+function makeCollector(session, inst, seen) {
+  return async (used) => {
+    // 快速判定无环：所有分量含端点
+    const comps = components(inst.V, inst.inc, inst.edges, used);
+    for (const comp of comps) {
+      let hasEndpoint = false;
+      for (const v of comp) {
+        let d = 0;
+        for (const k of inst.inc[v]) if (used.has(k)) d++;
+        if (d === 1) { hasEndpoint = true; break; }
+      }
+      if (!hasEndpoint) return; // 含环，不是可用方案
+    }
+    const paths = rebuildPaths(inst.empty, inst.inc, inst.edges, used);
+    if (paths.length === 0) return;
+    const sig = multiSig(paths);
+    if (seen.has(sig)) return;
+    seen.add(sig);
+    const res = { status: 'sat', paths, iters: 0, seconds: 0, log: [] };
+    session.snapshots.push(makeSnapshot(session, 'probe', null, res));
+  };
+}
+
+// 求解会话基座：buildInstance 一次
+async function sessionBase(session, opts) {
+  const api = await initSolver(opts.moduleOverrides);
+  const inst = buildInstance(api, session.grid, session.boundary, { singlePath: false });
+  inst.api = api;
+  return inst;
+}
+
+// 1) 任意解（多路径，第一个无环解）
+export async function solveFirst(session, opts = {}, onProgress) {
+  try {
+    const inst = await sessionBase(session, opts);
+    if (inst.error) return { status: 'error', message: inst.error };
+    if (inst.V === 0) return { status: 'empty' };
+    if (inst.V === 1) {
+      const c = inst.empty[0];
+      const ok = !session.boundary || inst.onB(c);
+      if (!ok) return { status: 'unsat', message: '端点不在边界' };
+      const res = { status: 'sat', paths: [[c]], iters: 1, seconds: 0, log: [] };
+      const snap = makeSnapshot(session, 'first', null, res);
+      snap.log = [];
+      session.snapshots.push(snap);
+      return { status: 'sat', snapshot: snap };
+    }
+    const t0 = Date.now();
+    const secs = () => (Date.now() - t0) / 1000;
+    const api = inst.api;
+    api.Z3.global_param_set('sat.random_seed', String(opts.seed ?? 0));
+    const { Solver } = inst.ctx;
+    const s = new Solver();
+    s.add(...inst.base);
+    s.set('timeout', session.timeoutMs);
+    const res = await multiConnectedSolve(s, inst, secs, null, opts.isCancelled);
+    if (res.status === 'cancelled') return { status: 'cancelled', inst };
+    if (res.status === 'unsat') return { status: 'unsat', inst };
+    if (res.status !== 'sat') return { status: 'timeout', inst };
+    const snap = makeSnapshot(session, 'first', null, res);
+    snap.log = res.log;
+    session.snapshots.push(snap);
+    if (onProgress) onProgress({ phase: 'first', iter: res.iters, seconds: res.seconds });
+    return { status: 'sat', snapshot: snap };
+  } catch (err) {
+    return { status: 'error', message: err && err.message ? err.message : String(err) };
+  }
+}
+
+// 2) 优化路径数：在 from 方案约束基础上 minimize(endpointSum)，证明最优
+export async function optimizePaths(session, fromId, opts = {}, onProgress) {
+  const from = session.snapshots.find(s => s.id === fromId);
+  if (!from) return { status: 'error', message: '方案不存在' };
+  try {
+    const inst = await sessionBase(session, opts);
+    if (inst.error) return { status: 'error', message: inst.error };
+    if (inst.V === 0) return { status: 'empty' };
+    const constraints = logToConstraints(inst, from.log);
+
+    const seen = new Set([multiSig(from.paths)]);
+    const collect = makeCollector(session, inst, seen);
+    const t0 = Date.now();
+    const secs = () => (Date.now() - t0) / 1000;
+    const api = inst.api;
+    api.Z3.global_param_set('sat.random_seed', String(opts.seed ?? 0));
+    const { Optimize } = inst.ctx;
+    const opt = new Optimize();
+    opt.add(...constraints);
+    opt.minimize(inst.endpointSum);
+    opt.set('timeout', session.timeoutMs);
+    const res = await multiConnectedSolve(opt, inst, secs, async (used, iters) => {
+      await collect(used);
+      if (onProgress) onProgress({ phase: 'paths', iter: iters, seconds: secs() });
+    }, opts.isCancelled);
+    if (res.status === 'cancelled') return { status: 'cancelled', inst, res };
+    if (res.status === 'unsat') return { status: 'unsat', inst };
+    if (res.status !== 'sat') return { status: 'timeout', inst, res };
+    const snap = makeSnapshot(session, 'paths', fromId, res);
+    snap.log = [...from.log, ...res.log];
+    snap.provenPaths = true; // Optimize 返回 sat 即已证明最优
+    session.snapshots.push(snap);
+    return { status: 'sat', snapshot: snap, inst };
+  } catch (err) {
+    return { status: 'error', message: err && err.message ? err.message : String(err) };
+  }
+}
+
+// 3) 优化转弯数：锁定 from 方案的路径数，minimize(turnSum)，证明最优
+export async function optimizeTurns(session, fromId, opts = {}, onProgress) {
+  const from = session.snapshots.find(s => s.id === fromId);
+  if (!from) return { status: 'error', message: '方案不存在' };
+  try {
+    const inst = await sessionBase(session, opts);
+    if (inst.error) return { status: 'error', message: inst.error };
+    if (inst.V === 0) return { status: 'empty' };
+    const extra = [];
+    // 无条件锁定 from 的路径数（pathCount==1 也要锁，否则 minimize 转弯会自由变成多路径）
+    extra.push({ type: 'lockPaths', k: from.pathCount });
+    const constraints = logToConstraints(inst, [...from.log, ...extra]);
+
+    const seen = new Set([multiSig(from.paths)]);
+    const collect = makeCollector(session, inst, seen);
+    const t0 = Date.now();
+    const secs = () => (Date.now() - t0) / 1000;
+    const api = inst.api;
+    api.Z3.global_param_set('sat.random_seed', String(opts.seed ?? 0));
+    const { Optimize } = inst.ctx;
+    const opt = new Optimize();
+    opt.add(...constraints);
+    opt.minimize(inst.turnSum);
+    opt.set('timeout', session.timeoutMs);
+    const res = await multiConnectedSolve(opt, inst, secs, async (used, iters) => {
+      await collect(used);
+      if (onProgress) onProgress({ phase: 'turns', iter: iters, seconds: secs() });
+    }, opts.isCancelled);
+    if (res.status === 'cancelled') return { status: 'cancelled', inst, res };
+    if (res.status === 'unsat') return { status: 'unsat', inst };
+    if (res.status !== 'sat') return { status: 'timeout', inst, res };
+    const snap = makeSnapshot(session, 'turns', fromId, res);
+    snap.log = [...from.log, ...extra, ...res.log];
+    snap.provenTurns = true;
+    session.snapshots.push(snap);
+    return { status: 'sat', snapshot: snap, inst };
+  } catch (err) {
+    return { status: 'error', message: err && err.message ? err.message : String(err) };
+  }
 }

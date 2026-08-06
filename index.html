@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>网格哈密顿路径 · 纯前端 SAT 求解器</title>
+<title>网格路径覆盖 · 纯前端 SAT 求解器</title>
 <script src="coi-serviceworker.js"></script>
 <style>
   :root {
@@ -26,7 +26,7 @@
   header { padding: 16px 24px 8px; border-bottom: 1px solid var(--border); }
   h1 { margin: 0; font-size: 20px; }
   .sub { color: var(--muted); font-size: 13px; font-weight: normal; margin-left: 10px; }
-  main { padding: 16px 24px 32px; max-width: 900px; }
+  main { padding: 16px 24px 32px; max-width: 960px; }
   .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
   .controls label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
   input[type="number"] {
@@ -38,8 +38,9 @@
     border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
   }
   button:hover { border-color: var(--muted); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button:disabled:hover { border-color: var(--border); }
   button.primary { background: var(--gold); color: #1a1500; font-weight: 600; border-color: transparent; }
-  button.primary:disabled { opacity: 0.5; cursor: wait; }
   input[type="checkbox"] { accent-color: var(--gold); }
   .board-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; display: inline-block; }
   canvas { display: block; cursor: pointer; }
@@ -50,7 +51,20 @@
   }
   .status.sat { border-color: var(--green); color: var(--green); }
   .status.unsat { border-color: var(--red); color: var(--red); }
-  .clist { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .prog {
+    margin-top: 10px; padding: 6px 14px; border-radius: 8px;
+    border: 1px dashed var(--border); background: #131920;
+    font-family: Consolas, "Courier New", monospace; font-size: 12.5px; color: var(--gold);
+  }
+  .hist-panel { margin-top: 14px; }
+  .hist-head {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    margin-bottom: 8px; font-weight: 600; font-size: 13px; color: var(--muted);
+  }
+  .hist-head .actions { display: flex; gap: 8px; margin-left: auto; }
+  .hist-head button { padding: 4px 12px; font-size: 12.5px; font-weight: normal; }
+  .hist-head button.hl { border-color: var(--gold); color: var(--gold); }
+  .clist { display: flex; flex-direction: column; gap: 6px; }
   .clist-item {
     display: flex; align-items: center; gap: 8px; width: 100%;
     padding: 7px 12px; background: var(--panel); color: var(--text);
@@ -60,18 +74,29 @@
   }
   .clist-item:hover { border-color: var(--muted); }
   .clist-item.selected { border-color: var(--gold); background: #26220f; }
-  .clist-item .tag {
+  .clist-item .id { color: var(--muted); flex-shrink: 0; }
+  .clist-item .label { flex-shrink: 0; }
+  .clist-item .badge {
     padding: 1px 8px; border-radius: 10px; font-size: 11px; flex-shrink: 0;
+    background: var(--green); color: #04150a; font-weight: 600;
   }
-  .tag.best { background: var(--gold); color: #1a1500; font-weight: 600; }
-  .tag.sample { background: #2b3648; color: #9db4d0; }
-  .tag.variety { background: #2b3648; color: #9db4d0; }
-  .clist-item .turns { font-weight: 600; color: var(--gold); flex-shrink: 0; }
+  .clist-item .counts { font-weight: 600; color: var(--gold); flex-shrink: 0; }
   .clist-item .meta { color: var(--muted); flex: 1; text-align: right; }
   .clist-empty { color: var(--muted); font-size: 12.5px; padding: 4px 2px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .legend-item {
+    display: flex; align-items: center; gap: 6px;
+    padding: 3px 10px; background: #101418; color: var(--text);
+    border: 1px solid var(--border); border-radius: 20px; cursor: pointer;
+    font-size: 12px; font-family: Consolas, "Courier New", monospace;
+  }
+  .legend-item:hover { border-color: var(--muted); }
+  .legend-item.active { border-color: var(--gold); }
+  .legend-item .swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
   .pathout {
-    margin-top: 10px; max-height: 120px; overflow: auto; font-size: 12px;
+    margin-top: 10px; max-height: 140px; overflow: auto; font-size: 12px;
     font-family: Consolas, monospace; color: var(--muted); word-break: break-all;
+    white-space: pre-wrap;
   }
   #wasmbar {
     position: fixed; left: 0; right: 0; bottom: 0; height: 26px; z-index: 20;
@@ -91,7 +116,7 @@
 </head>
 <body>
 <header>
-  <h1>网格哈密顿路径<span class="sub">纯前端 SAT 求解 · z3-wasm</span></h1>
+  <h1>网格路径覆盖<span class="sub">纯前端 SAT 求解 · z3-wasm · 交互式优化</span></h1>
 </header>
 <main>
   <section class="controls">
@@ -102,21 +127,37 @@
     <button id="random">随机占用</button>
     <button id="clear">清空</button>
     <label><input id="boundary" type="checkbox" checked> 端点限边界</label>
-    <button id="solve" class="primary">🧮 求解</button>
-    <button id="copy">复制路径</button>
+    <button id="solve" class="primary">🧮 求解（任意解）</button>
+    <button id="cancel" disabled>取消</button>
+    <button id="copy" disabled>复制路径</button>
   </section>
   <section class="board-wrap">
     <canvas id="board"></canvas>
+    <div id="legend" class="legend"></div>
   </section>
-  <div id="status" class="status">就绪 · 点击格子切换障碍（红叉），点「求解」</div>
-  <div id="clist" class="clist"></div>
+  <div id="status" class="status">就绪 · 点击格子切换障碍（红叉）</div>
+  <div id="prog" class="prog" hidden></div>
+  <section class="hist-panel">
+    <div class="hist-head">
+      <span>方案历史</span>
+      <span class="actions">
+        <button id="optPaths" disabled title="最小化路径数（严格证明最优）">优化路径数</button>
+        <button id="optTurns" disabled title="锁定当前路径数，最小化转弯数（严格证明最优）">优化转弯数</button>
+        <button id="optAll" class="hl" disabled title="依次执行：优化路径数 → 优化转弯数">一键优化全部</button>
+        <button id="exportBtn" title="导出当前会话为 JSON">导出</button>
+        <button id="importBtn" title="导入会话 JSON">导入</button>
+        <button id="clearSess" title="清除已保存的会话历史">清除会话</button>
+        <input id="importFile" type="file" accept=".json,application/json" hidden>
+      </span>
+    </div>
+    <div id="hist" class="clist"></div>
+  </section>
   <div id="pathout" class="pathout"></div>
 </main>
 <div id="wasmbar" hidden>
   <div id="wasmbar-fill"></div>
   <span id="wasmbar-label"></span>
 </div>
-<script src="z3/z3-built.js"></script>
 <script src="app.js" defer></script>
 </body>
 </html>
