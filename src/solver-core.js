@@ -743,9 +743,9 @@ function makeSnapshot(session, kind, fromId, res, extra = {}) {
     ...extra,
   };
   if (kind === 'first') snap.label = '任意解';
-  else if (kind === 'paths') snap.label = `优化路径数 → ${snap.pathCount} 条`;
-  else if (kind === 'turns') snap.label = `优化转弯数 → ${snap.turnSum} 弯`;
-  else if (kind === 'probe') snap.label = `中间解 · ${snap.pathCount}路径 / ${snap.turnSum}弯`;
+  else if (kind === 'paths') snap.label = `路径数优化到 ${snap.pathCount} 条`;
+  else if (kind === 'turns') snap.label = `转弯数优化到 ${snap.turnSum} 弯`;
+  else if (kind === 'probe') snap.label = `中间解，${snap.pathCount} 条路径、${snap.turnSum} 弯`;
   return snap;
 }
 
@@ -807,7 +807,7 @@ export async function solveFirst(session, opts = {}, onProgress) {
     const { Solver } = inst.ctx;
     const s = new Solver();
     s.add(...inst.base);
-    s.set('timeout', session.timeoutMs);
+    if (session.timeoutMs) s.set('timeout', session.timeoutMs);
     const res = await multiConnectedSolve(s, inst, secs, null, opts.isCancelled);
     if (res.status === 'cancelled') return { status: 'cancelled', inst };
     if (res.status === 'unsat') return { status: 'unsat', inst };
@@ -842,7 +842,7 @@ export async function optimizePaths(session, fromId, opts = {}, onProgress) {
     const opt = new Optimize();
     opt.add(...constraints);
     opt.minimize(inst.endpointSum);
-    opt.set('timeout', session.timeoutMs);
+    if (session.timeoutMs) opt.set('timeout', session.timeoutMs);
     const res = await multiConnectedSolve(opt, inst, secs, async (used, iters) => {
       await collect(used);
       if (onProgress) onProgress({ phase: 'paths', iter: iters, seconds: secs() });
@@ -890,7 +890,7 @@ export async function optimizeTurns(session, fromId, opts = {}, onProgress) {
     const opt = new Optimize();
     opt.add(...constraints);
     opt.minimize(inst.turnSum);
-    opt.set('timeout', session.timeoutMs);
+    if (session.timeoutMs) opt.set('timeout', session.timeoutMs);
     const res = await multiConnectedSolve(opt, inst, secs, async (used, iters) => {
       await collect(used);
       if (onProgress) onProgress({ phase: 'turns', iter: iters, seconds: secs() });

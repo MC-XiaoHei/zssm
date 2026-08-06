@@ -25,12 +25,13 @@ let _reqId = 0;
 let _wasmBlobUrl = null;
 let _z3ScriptUrl = '';
 
-const PHASE_DESC = { first: '求解中（求任意解）', paths: '优化路径数', turns: '优化转弯数' };
+const PHASE_DESC = { first: '正在求解', paths: '正在优化路径数', turns: '正在优化转弯数' };
 
 function onWorkerMessage(ev) {
   const m = ev.data;
   if (m.type === 'progress') {
-    setProg(`${PHASE_DESC[m.action] || '求解中'} · 第 ${m.payload.iter} 轮 · ${fmtSecs(m.payload.seconds)}`);
+    _lastBeat = performance.now();
+    setProg(`${PHASE_DESC[m.action] || '正在求解'}，第 ${m.payload.iter} 轮`);
     renderHist();
   } else if (m.type === 'done') {
     const cb = _pending.get(m.id);
@@ -39,7 +40,7 @@ function onWorkerMessage(ev) {
       cb(m.res);
     }
   } else if (m.type === 'error' || m.type === 'init-error') {
-    setStatus('求解内核异常: ' + m.message);
+    setStatus('内核异常: ' + m.message);
   }
 }
 
@@ -49,7 +50,7 @@ function onWorkerError(e) {
   _pending.clear();
   setBusy(null);
   setProg('');
-  setStatus('求解内核异常终止（worker 崩溃），请重新点「求解」');
+  setStatus('内核异常，请重试');
 }
 
 function ensureWorker() {
@@ -107,12 +108,12 @@ function resizeGrid(rows, cols) {
 function newUiSession(msg) {
   state.session = newSession(state.grid, {
     boundary: $('boundary').checked,
-    timeoutMs: 30000,
+    timeoutMs: 0, // 0 = 不设超时，一直求解直到出解或用户点「取消」
   });
   state.selId = null;
   state.highlight = null;
+  renderLegend(null);
   saveSession();
-  setPathText('');
   renderHist();
   updateButtons();
   if (msg) setStatus(msg);
@@ -193,7 +194,7 @@ function exportSession() {
   a.download = `zssm-session-${new Date().toISOString().slice(0, 10)}.json`;
   a.click();
   URL.revokeObjectURL(a.href);
-  setStatus('已导出会话 JSON');
+  setStatus('已导出');
 }
 
 function importSession(file) {
@@ -202,7 +203,7 @@ function importSession(file) {
     try {
       const data = JSON.parse(reader.result);
       if (!Array.isArray(data.grid) || !Array.isArray(data.snapshots)) {
-        setStatus('导入失败：不是有效的会话文件');
+        setStatus('导入失败：文件格式无效');
         return;
       }
       data.snapshots.forEach((s, i) => {
@@ -215,7 +216,7 @@ function importSession(file) {
       state.session = {
         grid: data.grid,
         boundary: !!data.boundary,
-        timeoutMs: data.timeoutMs ?? 30000,
+        timeoutMs: 0, // 恢复的会话同样不设超时（旧数据里的 30000 被覆盖）
         snapshots: data.snapshots,
         nextId: data.snapshots.length + 1,
         createdAt: data.createdAt ?? Date.now(),
@@ -228,10 +229,10 @@ function importSession(file) {
       saveSession();
       renderHist();
       if (state.selId) selectSnapshot(state.selId);
-      setStatus(`已导入会话：${data.snapshots.length} 个方案`);
+      setStatus(`已导入 ${data.snapshots.length} 个方案`);
       render();
     } catch {
-      setStatus('导入失败：JSON 解析错误');
+      setStatus('导入失败：解析错误');
     }
   };
   reader.readAsText(file);
@@ -245,10 +246,18 @@ let CELL = 30;
 
 function resizeCanvas() {
   const maxDim = Math.max(state.rows, state.cols);
-  CELL = Math.max(8, Math.floor((640 - MARGIN) / maxDim));
-  canvas.width = MARGIN + state.cols * CELL;
-  canvas.height = MARGIN + state.rows * CELL;
+  const wrap = document.querySelector('.board-wrap');
+  let avail = wrap ? wrap.clientWidth : 640;
+  if (wrap) {
+    const cs = getComputedStyle(wrap);
+    avail -= (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+  }
+  CELL = Math.max(8, Math.floor((avail - MARGIN * 2) / maxDim));
+  canvas.width = MARGIN * 2 + state.cols * CELL;
+  canvas.height = MARGIN * 2 + state.rows * CELL;
 }
+
+window.addEventListener('resize', render);
 
 const cx = (j) => MARGIN + j * CELL + CELL / 2;
 const cy = (i) => MARGIN + i * CELL + CELL / 2;
@@ -389,7 +398,7 @@ function renderLegend(snap) {
     el.className = 'legend-item' + (state.highlight === i ? ' active' : '');
     el.innerHTML =
       `<span class="swatch" style="background:${pathColor(i, snap.paths.length)}"></span>` +
-      `路径 ${i + 1} · 长度${p.length} · 弯${countTurns(p)}`;
+      `路径 <span class="num">${i + 1}</span>：长度 <span class="num">${p.length}</span>，弯 <span class="num">${countTurns(p)}</span>`;
     el.addEventListener('click', () => {
       state.highlight = state.highlight === i ? null : i;
       renderLegend(snap);
@@ -403,25 +412,53 @@ function renderLegend(snap) {
 function setStatus(text, cls) {
   const el = $('status');
   el.textContent = text;
-  el.className = 'status' + (cls ? ' ' + cls : '');
-}
-
-function setPathText(text) {
-  $('pathout').textContent = text;
+  el.className = 'card status' + (cls ? ' ' + cls : '');
 }
 
 function setProg(text) {
   const el = $('prog');
   if (text) {
-    el.textContent = text;
+    $('progMsg').textContent = text;
     el.hidden = false;
   } else {
     el.hidden = true;
   }
 }
 
+// ---------- 求解实时计时器 ----------
+let _timerH = null;
+let _t0 = 0;
+let _lastBeat = 0;
+
+function startTimer() {
+  stopTimer();
+  _t0 = performance.now();
+  _lastBeat = _t0;
+  _timerH = setInterval(tickTimer, 100);
+  tickTimer();
+}
+
+function stopTimer() {
+  if (_timerH) {
+    clearInterval(_timerH);
+    _timerH = null;
+  }
+  const t = $('timer');
+  if (t) t.textContent = '';
+}
+
+function tickTimer() {
+  const el = $('timer');
+  if (!el) return;
+  const now = performance.now();
+  const secs = (now - _t0) / 1000;
+  const idle = (now - _lastBeat) / 1000;
+  // idle >= 5s 提示「最后进度 Ns 前」：进度停滞时可区分卡死与正常求解
+  el.textContent = `已用 ${secs.toFixed(1)} 秒` + (idle >= 5 ? `，最后更新 ${Math.floor(idle)} 秒前` : '');
+}
+
 function fmtSecs(s) {
-  return s !== undefined ? s.toFixed(2) + 's' : '-';
+  return s !== undefined ? s.toFixed(2) + ' 秒' : '-';
 }
 
 function fmtTime(ms) {
@@ -433,7 +470,7 @@ function renderHist() {
   const box = $('hist');
   const s = state.session;
   if (!s || s.snapshots.length === 0) {
-    box.innerHTML = '<div class="clist-empty">（暂无方案，点「求解」开始）</div>';
+    box.innerHTML = '<div class="clist-empty">暂无方案</div>';
     return;
   }
   box.innerHTML = '';
@@ -448,8 +485,8 @@ function renderHist() {
       `<span class="id">#${snap.id}</span>` +
       `<span class="label">${snap.label}</span>` +
       badges.join('') +
-      `<span class="counts">${snap.pathCount ?? '-'}路径 / ${snap.turnSum ?? '-'}弯</span>` +
-      `<span class="meta">${fmtSecs(snap.elapsedMs / 1000)} · ${fmtTime(snap.createdAt)}${snap.check && snap.check !== 'OK' ? ' · ⚠' + snap.check : ''}</span>`;
+      `<span class="counts"><span class="num">${snap.pathCount ?? '-'}</span> 条路径、<span class="num">${snap.turnSum ?? '-'}</span> 弯</span>` +
+      `<span class="meta">${fmtSecs(snap.elapsedMs / 1000)}，${fmtTime(snap.createdAt)}${snap.check && snap.check !== 'OK' ? '，校验失败' : ''}</span>`;
     btn.addEventListener('click', () => selectSnapshot(snap.id));
     box.appendChild(btn);
   });
@@ -462,19 +499,14 @@ function selectSnapshot(id, prefix = '') {
   if (!snap) return;
   state.selId = id;
   state.highlight = null;
-  if (snap.paths && snap.paths.length) {
-    setPathText(pathsText(snap.paths));
-  } else {
-    setPathText('');
-  }
   renderLegend(snap);
   const proven = [
-    snap.provenPaths ? '路径数已证最优' : '',
-    snap.provenTurns ? '转弯数已证最优' : '',
+    snap.provenPaths ? '已证明路径最优' : '',
+    snap.provenTurns ? '已证明转弯最优' : '',
   ].filter(Boolean).join(' · ');
   setStatus(
-    `${prefix}${snap.label} · ${snap.pathCount}路径 / ${snap.turnSum}弯 · 迭代${snap.iters} · ` +
-      `${fmtSecs(snap.elapsedMs / 1000)} · 校验${snap.check}${proven ? ' · ' + proven : ''}`,
+    `${prefix}${snap.label}，${snap.pathCount} 条路径、${snap.turnSum} 弯，用时 ` +
+      `${fmtSecs(snap.elapsedMs / 1000)}${proven ? '，' + proven : ''}`,
     'sat'
   );
   renderHist();
@@ -498,14 +530,16 @@ function updateButtons() {
   $('solve').disabled = solving || !s || s.snapshots.length > 0;
   $('cancel').disabled = !solving;
   $('copy').disabled = solving || !snap;
-  $('optPaths').disabled = solving || !snap || snap.provenPaths;
+  $('optPaths').disabled = solving || !snap || snap.pathCount <= 1 || snap.provenPaths;
   $('optTurns').disabled = solving || !snap || snap.provenTurns;
-  $('optAll').disabled = solving || !snap || (snap.provenPaths && snap.provenTurns);
+  $('optAll').disabled =
+    solving || !snap || ((snap.pathCount <= 1 || snap.provenPaths) && snap.provenTurns);
 }
 
 function setBusy(text) {
   state.solving = !!text;
   if (text) setProg(text);
+  else stopTimer();
   updateButtons();
 }
 
@@ -516,6 +550,7 @@ async function runAction(action) {
   if (action.needsFrom !== false && !from) return false;
   state.cancelled = false;
   setBusy(`${action.desc}…`);
+  startTimer();
   const id = ++_reqId;
   return new Promise((resolve) => {
     _pending.set(id, (res) => {
@@ -555,25 +590,25 @@ function handleResult(res) {
     }
     state.selId = snap.id;
     const proven = [
-      snap.provenPaths ? '路径数已证最优' : '',
-      snap.provenTurns ? '转弯数已证最优' : '',
-    ].filter(Boolean).join(' · ');
+      snap.provenPaths ? '已证明路径最优' : '',
+      snap.provenTurns ? '已证明转弯最优' : '',
+  ].filter(Boolean).join('，');
     setStatus(
-      `SAT 有解 · ${snap.pathCount}路径 / ${snap.turnSum}弯 · 迭代${snap.iters} · ` +
-        `${fmtSecs(snap.elapsedMs / 1000)} · 校验${snap.check}${proven ? ' · ' + proven : ''}`,
+      `有解：${snap.label}，${snap.pathCount} 条路径、${snap.turnSum} 弯，用时 ` +
+        `${fmtSecs(snap.elapsedMs / 1000)}${proven ? '，' + proven : ''}`,
       'sat'
     );
   } else if (res.status === 'unsat') {
-    setStatus(`UNSAT 严格证明无解 · 该网格在此约束下无法用路径覆盖所有空格`, 'unsat');
+    setStatus('已证明无解', 'unsat');
   } else if (res.status === 'timeout') {
-    setStatus(`超时 · 30s 内未完成（可点「取消」停止，或换布局）`);
+    setStatus('求解中断');
   } else if (res.status === 'cancelled') {
     setStatus('已取消');
   } else if (res.status === 'empty') {
-    setStatus('EMPTY · 网格没有空格，无需求解');
+    setStatus('网格为空');
   } else if (res.status === 'error') {
     const hint = /SharedArrayBuffer|COOP|COEP/i.test(res.message)
-      ? ' — 缺少 COOP/COEP 响应头，请用「pnpm serve」启动或按 DEPLOY.md 配置部署头。'
+      ? ' — 缺少 COOP/COEP 响应头，请按 DEPLOY.md 配置部署头。'
       : '';
     setStatus('求解失败: ' + res.message + hint);
   }
@@ -582,7 +617,6 @@ function handleResult(res) {
   if (state.selId) {
     const snap = selSnapshot();
     if (snap && snap.paths) {
-      setPathText(pathsText(snap.paths));
       renderLegend(snap);
     }
   }
@@ -604,7 +638,7 @@ canvas.addEventListener('click', (e) => {
   const i = Math.floor((e.clientY - rect.top - MARGIN) / CELL);
   if (i < 0 || j < 0 || i >= state.rows || j >= state.cols) return;
   state.grid[i][j] = state.grid[i][j] ? 0 : 1;
-  onGridEdited('已编辑 · 点「求解（任意解）」');
+  onGridEdited('网格已更新，可重新求解');
 });
 
 $('rebuild').addEventListener('click', () => {
@@ -618,19 +652,7 @@ $('rebuild').addEventListener('click', () => {
 
 $('example').addEventListener('click', () => {
   loadSample();
-  onGridEdited('已载入 9×11 示例布局（87 空格 / 12 障碍）');
-});
-
-$('random').addEventListener('click', () => {
-  const g = makeGrid(state.rows, state.cols);
-  for (let i = 0; i < state.rows; i++) {
-    for (let j = 0; j < state.cols; j++) {
-      g[i][j] = Math.random() < 0.15 ? 1 : 0;
-    }
-  }
-  if (g.flat().every(v => v === 1)) g[0][0] = 0;
-  state.grid = g;
-  onGridEdited('已随机占用 15% · 点「求解（任意解）」');
+  onGridEdited('已载入 87 空格、12 障碍的示例布局');
 });
 
 $('clear').addEventListener('click', () => {
@@ -640,38 +662,38 @@ $('clear').addEventListener('click', () => {
 
 $('boundary').addEventListener('change', () => {
   if (state.solving) return;
-  onGridEdited('端点限边界已更改 · 已开始新会话');
+  onGridEdited('已更改端点限边界，开始新会话');
 });
 
 $('solve').addEventListener('click', () => {
   onGridEdited('已开始新求解会话');
-  runAction({ needsFrom: false, action: 'first', desc: '求解中（求任意解）' });
+  runAction({ needsFrom: false, action: 'first', desc: '正在求解' });
 });
 
 $('optPaths').addEventListener('click', () => {
-  runAction({ needsFrom: true, action: 'paths', desc: '优化路径数' });
+  runAction({ needsFrom: true, action: 'paths', desc: '正在优化路径数' });
 });
 
 $('optTurns').addEventListener('click', () => {
-  runAction({ needsFrom: true, action: 'turns', desc: '优化转弯数' });
+  runAction({ needsFrom: true, action: 'turns', desc: '正在优化转弯数' });
 });
 
 $('optAll').addEventListener('click', async () => {
   let snap = selSnapshot();
   if (!snap || state.solving) return;
-  if (!snap.provenPaths) {
-    await runAction({ needsFrom: true, action: 'paths', desc: '优化路径数' });
+  if (snap.pathCount > 1 && !snap.provenPaths) {
+    await runAction({ needsFrom: true, action: 'paths', desc: '正在优化路径数' });
     snap = selSnapshot();
   }
   if (state.solving || !snap) return;
   if (!snap.provenTurns) {
-    await runAction({ needsFrom: true, action: 'turns', desc: '优化转弯数' });
+    await runAction({ needsFrom: true, action: 'turns', desc: '正在优化转弯数' });
   }
 });
 
 $('cancel').addEventListener('click', () => {
   state.cancelled = true;
-  setProg('正在停止…（等待当前轮结束）');
+  setProg('正在停止…');
   $('cancel').disabled = true;
   ensureWorker().postMessage({ type: 'cancel' });
 });
@@ -691,7 +713,7 @@ $('copy').addEventListener('click', async () => {
     ta.select();
     document.execCommand('copy');
     ta.remove();
-    setStatus(`已复制 ${n} 条路径（降级方式）`);
+    setStatus(`已复制 ${n} 条路径`);
   }
 });
 
@@ -706,7 +728,7 @@ $('importFile').addEventListener('change', (e) => {
 
 $('clearSess').addEventListener('click', () => {
   if (!state.session || state.session.snapshots.length === 0) {
-    setStatus('没有可清除的会话');
+    setStatus('没有可清除的历史');
     return;
   }
   try {
@@ -726,10 +748,10 @@ preloadWasm(frac => {
   const label = $('wasmbar-label');
   if (frac < 0) {
     fill.style.width = '35%';
-    label.textContent = '加载 WASM 求解内核…';
+    label.textContent = '加载求解内核…';
   } else {
     fill.style.width = (frac * 100).toFixed(1) + '%';
-    label.textContent = '加载 WASM 求解内核 ' + (frac * 100).toFixed(0) + '%';
+    label.textContent = '加载求解内核 ' + (frac * 100).toFixed(0) + '%';
   }
 })
   .then(({ blobUrl, scriptUrl }) => {
@@ -747,9 +769,9 @@ preloadWasm(frac => {
 if (loadSaved()) {
   const n = state.session.snapshots.length;
   renderHist();
-  if (state.selId) selectSnapshot(state.selId, `已恢复上次会话（${n} 个方案）· `);
+  if (state.selId) selectSnapshot(state.selId, `已恢复 ${n} 个方案：`);
 } else {
   loadSample();
-  newUiSession('就绪 · 点击格子切换障碍（红叉），点「求解（任意解）」');
+  newUiSession();
 }
 render();
