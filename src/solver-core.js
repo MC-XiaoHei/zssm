@@ -624,7 +624,7 @@ export function verifyMulti(paths, grid, boundary) {
 }
 
 // 多路径解指纹：全部路径无向边集合的排序签名
-function multiSig(paths) {
+export function multiSig(paths) {
   const pairs = [];
   for (const path of paths) {
     for (let k = 0; k + 1 < path.length; k++) {
@@ -686,7 +686,7 @@ async function multiConnectedSolve(solver, inst, secs, collect, isCancelled) {
     for (let k = 0; k < inst.edges.length; k++) {
       if (model.eval(inst.x[k]).toString() === 'true') used.add(k);
     }
-    if (collect) await collect(used, iters);
+    if (collect) await collect(used, iters, [...log]);
 
     const comps = components(inst.V, inst.inc, inst.edges, used);
     const pureCycles = [];
@@ -749,9 +749,10 @@ function makeSnapshot(session, kind, fromId, res, extra = {}) {
   return snap;
 }
 
-// 收集中间无环解入历史（去重），返回本次是否新增
-function makeCollector(session, inst, seen) {
-  return async (used) => {
+// 收集中间无环解入历史（去重），返回是否本次新增
+// baseLog：进入本次求解前已添加的约束日志（probe 快照完整 replay 的依据）
+function makeCollector(session, inst, seen, baseLog = []) {
+  return async (used, iters, logCopy = []) => {
     // 快速判定无环：所有分量含端点
     const comps = components(inst.V, inst.inc, inst.edges, used);
     for (const comp of comps) {
@@ -769,7 +770,9 @@ function makeCollector(session, inst, seen) {
     if (seen.has(sig)) return;
     seen.add(sig);
     const res = { status: 'sat', paths, iters: 0, seconds: 0, log: [] };
-    session.snapshots.push(makeSnapshot(session, 'probe', null, res));
+    session.snapshots.push(
+      makeSnapshot(session, 'probe', null, res, { log: [...baseLog, ...logCopy] })
+    );
   };
 }
 
@@ -827,10 +830,10 @@ export async function optimizePaths(session, fromId, opts = {}, onProgress) {
     const inst = await sessionBase(session, opts);
     if (inst.error) return { status: 'error', message: inst.error };
     if (inst.V === 0) return { status: 'empty' };
-    const constraints = logToConstraints(inst, from.log);
+    const constraints = logToConstraints(inst, from.log ?? []);
 
     const seen = new Set([multiSig(from.paths)]);
-    const collect = makeCollector(session, inst, seen);
+    const collect = makeCollector(session, inst, seen, from.log ?? []);
     const t0 = Date.now();
     const secs = () => (Date.now() - t0) / 1000;
     const api = inst.api;
@@ -848,13 +851,15 @@ export async function optimizePaths(session, fromId, opts = {}, onProgress) {
     if (res.status === 'unsat') return { status: 'unsat', inst };
     if (res.status !== 'sat') return { status: 'timeout', inst, res };
     const snap = makeSnapshot(session, 'paths', fromId, res);
-    snap.log = [...from.log, ...res.log];
+    snap.log = [...(from.log ?? []), ...res.log];
     snap.provenPaths = true; // Optimize 返回 sat 即已证明最优
     session.snapshots.push(snap);
+    // 过滤与最终解相同的 probe（最后一轮模型的中间解会与最终解重复）
+    const finalSig = multiSig(snap.paths);
     return {
       status: 'sat',
       snapshot: snap,
-      probes: session.snapshots.filter(s => s.kind === 'probe'),
+      probes: session.snapshots.filter(s => s.kind === 'probe' && multiSig(s.paths) !== finalSig),
       inst,
     };
   } catch (err) {
@@ -873,10 +878,10 @@ export async function optimizeTurns(session, fromId, opts = {}, onProgress) {
     const extra = [];
     // 无条件锁定 from 的路径数（pathCount==1 也要锁，否则 minimize 转弯会自由变成多路径）
     extra.push({ type: 'lockPaths', k: from.pathCount });
-    const constraints = logToConstraints(inst, [...from.log, ...extra]);
+    const constraints = logToConstraints(inst, [...(from.log ?? []), ...extra]);
 
     const seen = new Set([multiSig(from.paths)]);
-    const collect = makeCollector(session, inst, seen);
+    const collect = makeCollector(session, inst, seen, [...(from.log ?? []), ...extra]);
     const t0 = Date.now();
     const secs = () => (Date.now() - t0) / 1000;
     const api = inst.api;
@@ -894,13 +899,15 @@ export async function optimizeTurns(session, fromId, opts = {}, onProgress) {
     if (res.status === 'unsat') return { status: 'unsat', inst };
     if (res.status !== 'sat') return { status: 'timeout', inst, res };
     const snap = makeSnapshot(session, 'turns', fromId, res);
-    snap.log = [...from.log, ...extra, ...res.log];
+    snap.log = [...(from.log ?? []), ...extra, ...res.log];
     snap.provenTurns = true;
     session.snapshots.push(snap);
+    // 过滤与最终解相同的 probe（最后一轮模型的中间解会与最终解重复）
+    const finalSig = multiSig(snap.paths);
     return {
       status: 'sat',
       snapshot: snap,
-      probes: session.snapshots.filter(s => s.kind === 'probe'),
+      probes: session.snapshots.filter(s => s.kind === 'probe' && multiSig(s.paths) !== finalSig),
       inst,
     };
   } catch (err) {

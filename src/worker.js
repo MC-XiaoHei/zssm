@@ -51,7 +51,7 @@ self.addEventListener('message', async (ev) => {
       if (from) {
         session.snapshots.push({
           id: from.id,
-          log: from.log,
+          log: from.log ?? [],
           paths: from.paths,
           pathCount: from.pathCount,
         });

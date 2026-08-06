@@ -1,6 +1,6 @@
 // ui.js — 交互式优化 UI（会话/历史/实时进度/多路径绘制/持久化）
 // 求解在 Web Worker 中执行（z3 wasm 不进主线程），主线程只做渲染与状态管理。
-import { newSession, preloadWasm, z3ScriptUrl, countTurns } from './solver-core.js';
+import { newSession, preloadWasm, z3ScriptUrl, countTurns, multiSig } from './solver-core.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -547,6 +547,9 @@ function handleResult(res) {
     snap.id = state.session.nextId++;
     state.session.snapshots.push(snap);
     for (const p of res.probes || []) {
+      // 与历史已有解（含刚入的最终解）sig 相同则丢弃，避免重复方案
+      const sig = multiSig(p.paths);
+      if (state.session.snapshots.some(s => s.paths && multiSig(s.paths) === sig)) continue;
       p.id = state.session.nextId++;
       state.session.snapshots.push(p);
     }
