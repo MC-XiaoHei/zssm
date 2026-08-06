@@ -851,7 +851,12 @@ export async function optimizePaths(session, fromId, opts = {}, onProgress) {
     snap.log = [...from.log, ...res.log];
     snap.provenPaths = true; // Optimize 返回 sat 即已证明最优
     session.snapshots.push(snap);
-    return { status: 'sat', snapshot: snap, inst };
+    return {
+      status: 'sat',
+      snapshot: snap,
+      probes: session.snapshots.filter(s => s.kind === 'probe'),
+      inst,
+    };
   } catch (err) {
     return { status: 'error', message: err && err.message ? err.message : String(err) };
   }
@@ -892,7 +897,12 @@ export async function optimizeTurns(session, fromId, opts = {}, onProgress) {
     snap.log = [...from.log, ...extra, ...res.log];
     snap.provenTurns = true;
     session.snapshots.push(snap);
-    return { status: 'sat', snapshot: snap, inst };
+    return {
+      status: 'sat',
+      snapshot: snap,
+      probes: session.snapshots.filter(s => s.kind === 'probe'),
+      inst,
+    };
   } catch (err) {
     return { status: 'error', message: err && err.message ? err.message : String(err) };
   }

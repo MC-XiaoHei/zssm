@@ -149,6 +149,11 @@ function loadSaved() {
     if (raw) data = JSON.parse(raw);
   } catch { data = null; }
   if (!data || !Array.isArray(data.grid) || !Array.isArray(data.snapshots)) return false;
+  // 兼容旧数据：快照 id 重新规范化（曾存在 worker 端重复 id 的脏数据）
+  data.snapshots.forEach((s, i) => {
+    s.id = i + 1;
+    s.parentId = null;
+  });
   state.rows = data.grid.length;
   state.cols = data.grid[0].length;
   state.grid = data.grid;
@@ -157,7 +162,7 @@ function loadSaved() {
     boundary: !!data.boundary,
     timeoutMs: data.timeoutMs ?? 30000,
     snapshots: data.snapshots,
-    nextId: data.nextId ?? data.snapshots.length + 1,
+    nextId: data.snapshots.length + 1,
     createdAt: data.createdAt ?? Date.now(),
   };
   $('rows').value = state.rows;
@@ -200,6 +205,10 @@ function importSession(file) {
         setStatus('导入失败：不是有效的会话文件');
         return;
       }
+      data.snapshots.forEach((s, i) => {
+        s.id = i + 1;
+        s.parentId = null;
+      });
       state.rows = data.grid.length;
       state.cols = data.grid[0].length;
       state.grid = data.grid;
@@ -208,7 +217,7 @@ function importSession(file) {
         boundary: !!data.boundary,
         timeoutMs: data.timeoutMs ?? 30000,
         snapshots: data.snapshots,
-        nextId: data.nextId ?? data.snapshots.length + 1,
+        nextId: data.snapshots.length + 1,
         createdAt: data.createdAt ?? Date.now(),
       };
       $('rows').value = state.rows;
@@ -482,9 +491,11 @@ function pathsText(paths) {
 
 // ---------- 求解流程 ----------
 function updateButtons() {
+  const s = state.session;
   const snap = selSnapshot();
   const solving = state.solving;
-  $('solve').disabled = solving;
+  // 已有任意解后「求解」无意义（再点会重复求任意解），禁用；编辑网格或清除会话可重新开始
+  $('solve').disabled = solving || !s || s.snapshots.length > 0;
   $('cancel').disabled = !solving;
   $('copy').disabled = solving || !snap;
   $('optPaths').disabled = solving || !snap || snap.provenPaths;
@@ -531,8 +542,14 @@ async function runAction(action) {
 function handleResult(res) {
   if (res.status === 'sat' && res.snapshot) {
     const snap = res.snapshot;
-    // worker 内是临时会话，快照需入主线程会话历史
+    // worker 内是临时会话（nextId 从 1 起），快照 id 由主线程重新分配，
+    // 否则与历史已有 id 冲突，历史列表点击无法切换
+    snap.id = state.session.nextId++;
     state.session.snapshots.push(snap);
+    for (const p of res.probes || []) {
+      p.id = state.session.nextId++;
+      state.session.snapshots.push(p);
+    }
     state.selId = snap.id;
     const proven = [
       snap.provenPaths ? '路径数已证最优' : '',
